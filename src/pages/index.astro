@@ -1,0 +1,607 @@
+---
+// "Ecosistema de Gestión de Medios y Citas" — main page.
+// Implements the two views from architecture.md §2 (Frontend):
+//   1. "Agregar Plan" — frictionless quick-capture form.
+//   2. The current week's approved panel ("aprobado_semana" items).
+//
+// No backend wiring yet: state lives in memory on the client. Items entered
+// in the form go into a pending pool (estado: 'pendiente', aprobado_semana:
+// false) rather than straight into the week panel — matching the "Curaduría
+// Limitada" goal of a manually curated weekly list, not an unfiltered feed.
+// Search "TODO(supabase)" for the one spot to wire in the real insert once
+// the ingestion endpoint from §2 exists.
+---
+
+<html lang="es">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="theme-color" content="#1B2430" />
+		<title>Nuestro plan — Semana</title>
+		<meta name="description" content="Captura rápida de planes y el menú aprobado para la semana." />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+			rel="stylesheet"
+		/>
+	</head>
+	<body>
+		<div class="app">
+			<header class="masthead">
+				<p class="eyebrow">Nuestro plan</p>
+				<h1 class="titulo">Menú de la semana</h1>
+				<p id="rango-semana" class="rango"></p>
+			</header>
+
+			<div class="divisor" role="presentation"></div>
+
+			<section aria-labelledby="captura-title">
+				<h2 id="captura-title">Agregar plan</h2>
+				<p class="hint">Anótenlo antes de que se les olvide — lo revisan juntos después.</p>
+
+				<form id="form-plan">
+					<label>
+						Título
+						<input required type="text" name="titulo" maxlength="80" placeholder="¿Qué vieron, jugaron o planearon?" />
+					</label>
+
+					<fieldset class="chips">
+						<legend>Tipo</legend>
+						<div class="chip-row" role="group" aria-label="Tipo de plan">
+							<button type="button" class="chip" data-tipo="pelicula" aria-pressed="false">Película</button>
+							<button type="button" class="chip" data-tipo="videojuego" aria-pressed="false">Videojuego</button>
+							<button type="button" class="chip" data-tipo="serie" aria-pressed="false">Serie</button>
+							<button type="button" class="chip" data-tipo="cita" aria-pressed="false">Cita</button>
+						</div>
+					</fieldset>
+
+					<div class="grid-2">
+						<label>
+							Fecha
+							<input required type="date" name="fecha" />
+						</label>
+						<label>
+							Costo
+							<input type="text" name="costo" placeholder="Gratis, $150..." />
+						</label>
+					</div>
+
+					<label>
+						Lugar
+						<input type="text" name="lugar" placeholder="Opcional" />
+					</label>
+
+					<label>
+						Enlace
+						<input type="url" name="url" placeholder="https://..." />
+					</label>
+
+					<button type="submit" class="btn-guardar">Guardar plan</button>
+					<p id="confirmacion" class="confirmacion" role="status"></p>
+				</form>
+			</section>
+
+			<div class="divisor" role="presentation"></div>
+
+			<section aria-labelledby="panel-title">
+				<div class="panel-head">
+					<h2 id="panel-title">Esta semana</h2>
+					<span id="contador-planes" class="contador"></span>
+				</div>
+
+				<ul id="lista-planes" class="lista-planes"></ul>
+				<p id="estado-vacio" class="vacio" hidden>Todavía no hay nada aprobado para esta semana.</p>
+			</section>
+
+			<footer class="nota">Se sincroniza con la bóveda de Obsidian cada noche.</footer>
+		</div>
+
+		<script>
+			type Tipo = 'pelicula' | 'videojuego' | 'serie' | 'cita';
+
+			interface Plan {
+				id: string;
+				titulo: string;
+				tipo: Tipo;
+				fecha: string; // ISO yyyy-mm-dd
+				lugar: string;
+				costo: string;
+				url: string;
+				estado: 'pendiente' | 'completado';
+				aprobado_semana: boolean;
+			}
+
+			const TIPOS: Record<Tipo, { label: string; color: string }> = {
+				pelicula: { label: 'Película', color: 'var(--brass)' },
+				videojuego: { label: 'Videojuego', color: 'var(--pine)' },
+				serie: { label: 'Serie', color: 'var(--slate)' },
+				cita: { label: 'Cita', color: 'var(--rose)' },
+			};
+
+			function inicioSemana(base = new Date()): Date {
+				const d = new Date(base);
+				const dia = d.getDay(); // 0 = domingo
+				const diff = (dia === 0 ? -6 : 1) - dia; // retrocede al lunes
+				d.setDate(d.getDate() + diff);
+				d.setHours(0, 0, 0, 0);
+				return d;
+			}
+
+			function offsetDia(n: number): string {
+				const d = inicioSemana();
+				d.setDate(d.getDate() + n);
+				return d.toISOString().slice(0, 10);
+			}
+
+			function formatearRangoSemana(): string {
+				const lunes = inicioSemana();
+				const domingo = new Date(lunes);
+				domingo.setDate(lunes.getDate() + 6);
+				const f = new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'short' });
+				return `${f.format(lunes)} – ${f.format(domingo)}`;
+			}
+
+			function formatearFechaCorta(iso: string): string {
+				const d = new Date(`${iso}T00:00:00`);
+				return new Intl.DateTimeFormat('es-MX', { weekday: 'short', day: 'numeric', month: 'short' }).format(d);
+			}
+
+			function escapeHTML(str: string): string {
+				const div = document.createElement('div');
+				div.textContent = str;
+				return div.innerHTML;
+			}
+
+			// Seed data represents plans already curated/approved for this week.
+			// Dates are relative to "today" so the panel always reads as current.
+			const planesSemana: Plan[] = [
+				{ id: crypto.randomUUID(), titulo: 'Noche de ciencia ficción', tipo: 'pelicula', fecha: offsetDia(2), lugar: 'Sala en casa', costo: 'Gratis', url: '', estado: 'pendiente', aprobado_semana: true },
+				{ id: crypto.randomUUID(), titulo: 'Mazmorra cooperativa semanal', tipo: 'videojuego', fecha: offsetDia(3), lugar: '', costo: '', url: '', estado: 'pendiente', aprobado_semana: true },
+				{ id: crypto.randomUUID(), titulo: 'Café y caminata en el centro', tipo: 'cita', fecha: offsetDia(5), lugar: 'Centro histórico', costo: '$150', url: '', estado: 'completado', aprobado_semana: true },
+				{ id: crypto.randomUUID(), titulo: 'Maratón temporada 2', tipo: 'serie', fecha: offsetDia(6), lugar: '', costo: '', url: '', estado: 'pendiente', aprobado_semana: true },
+			];
+
+			// Plans entered through the quick-capture form wait here until
+			// someone approves them into `planesSemana` (curation step, out of
+			// scope for this page — likely done directly against Supabase/Obsidian).
+			const pendientesSinAprobar: Plan[] = [];
+
+			const listaEl = document.getElementById('lista-planes') as HTMLUListElement;
+			const vacioEl = document.getElementById('estado-vacio') as HTMLParagraphElement;
+			const contadorEl = document.getElementById('contador-planes') as HTMLSpanElement;
+			const rangoEl = document.getElementById('rango-semana') as HTMLParagraphElement;
+			const formEl = document.getElementById('form-plan') as HTMLFormElement;
+			const confirmacionEl = document.getElementById('confirmacion') as HTMLParagraphElement;
+			const chipButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.chip'));
+			let tipoSeleccionado: Tipo | null = null;
+
+			rangoEl.textContent = formatearRangoSemana();
+
+			chipButtons.forEach((btn) => {
+				btn.addEventListener('click', () => {
+					chipButtons.forEach((b) => b.setAttribute('aria-pressed', 'false'));
+					btn.setAttribute('aria-pressed', 'true');
+					tipoSeleccionado = btn.dataset.tipo as Tipo;
+				});
+			});
+
+			function tarjetaHTML(plan: Plan): string {
+				const meta = TIPOS[plan.tipo];
+				const detalles = [plan.lugar, plan.costo].filter(Boolean).join(' · ');
+				return `
+					<li class="tarjeta" style="--tag-color:${meta.color}">
+						<span class="sello">${meta.label}</span>
+						<div class="tarjeta-cuerpo">
+							<h3>${escapeHTML(plan.titulo)}</h3>
+							<p class="tarjeta-meta">${formatearFechaCorta(plan.fecha)}${detalles ? ' · ' + escapeHTML(detalles) : ''}</p>
+						</div>
+						<span class="estado estado-${plan.estado}">${plan.estado}</span>
+					</li>
+				`;
+			}
+
+			function render(): void {
+				if (planesSemana.length === 0) {
+					listaEl.innerHTML = '';
+					vacioEl.hidden = false;
+					contadorEl.textContent = '';
+					return;
+				}
+				vacioEl.hidden = true;
+				const ordenado = [...planesSemana].sort((a, b) => a.fecha.localeCompare(b.fecha));
+				listaEl.innerHTML = ordenado.map(tarjetaHTML).join('');
+				contadorEl.textContent = `${planesSemana.length} ${planesSemana.length === 1 ? 'plan' : 'planes'}`;
+			}
+
+			formEl.addEventListener('submit', (e) => {
+				e.preventDefault();
+
+				if (!tipoSeleccionado) {
+					const fieldset = formEl.querySelector('.chips') as HTMLFieldSetElement;
+					fieldset.classList.add('chips-error');
+					fieldset.addEventListener('animationend', () => fieldset.classList.remove('chips-error'), { once: true });
+					return;
+				}
+
+				const datos = new FormData(formEl);
+				const nuevoPlan: Plan = {
+					id: crypto.randomUUID(),
+					titulo: String(datos.get('titulo') ?? '').trim(),
+					tipo: tipoSeleccionado,
+					fecha: String(datos.get('fecha') ?? ''),
+					lugar: String(datos.get('lugar') ?? '').trim(),
+					costo: String(datos.get('costo') ?? '').trim(),
+					url: String(datos.get('url') ?? '').trim(),
+					estado: 'pendiente',
+					aprobado_semana: false,
+				};
+
+				pendientesSinAprobar.push(nuevoPlan);
+				// TODO(supabase): swap the line above for a real insert into the
+				// `media_planner` table via the ingestion endpoint (architecture.md §2).
+
+				formEl.reset();
+				chipButtons.forEach((b) => b.setAttribute('aria-pressed', 'false'));
+				tipoSeleccionado = null;
+
+				confirmacionEl.textContent = 'Guardado. Aparecerá en "Esta semana" cuando lo aprueben.';
+				confirmacionEl.classList.add('confirmacion-visible');
+				window.setTimeout(() => confirmacionEl.classList.remove('confirmacion-visible'), 3200);
+			});
+
+			render();
+		</script>
+
+		<style>
+			:root {
+				--ink: #1b2430;
+				--paper: #f3e9d8;
+				--paper-dim: #cbb896;
+				--paper-line: #3a4658;
+				--brass: #c99a63;
+				--brass-deep: #a47148;
+				--pine: #7fa189;
+				--slate: #8aa4bd;
+				--rose: #d99aa3;
+				--radius: 14px;
+				--font-display: 'Fraunces', Georgia, serif;
+				--font-body: 'Work Sans', system-ui, sans-serif;
+				--font-mono: 'IBM Plex Mono', 'SFMono-Regular', monospace;
+			}
+
+			* {
+				box-sizing: border-box;
+			}
+
+			html,
+			body {
+				margin: 0;
+				padding: 0;
+				background: var(--ink);
+			}
+
+			body {
+				color: var(--paper);
+				font-family: var(--font-body);
+				-webkit-font-smoothing: antialiased;
+			}
+
+			.app {
+				max-width: 480px;
+				margin: 0 auto;
+				min-height: 100vh;
+				padding: 32px 20px 56px;
+			}
+
+			.eyebrow {
+				font-family: var(--font-mono);
+				font-size: 12px;
+				letter-spacing: 0.18em;
+				text-transform: uppercase;
+				color: var(--brass);
+				margin: 0;
+			}
+
+			.titulo {
+				font-family: var(--font-display);
+				font-weight: 600;
+				font-size: clamp(28px, 8vw, 36px);
+				margin: 6px 0 4px;
+			}
+
+			.rango {
+				font-family: var(--font-mono);
+				font-size: 13px;
+				color: var(--paper-dim);
+				margin: 0;
+			}
+
+			.divisor {
+				position: relative;
+				height: 1px;
+				margin: 30px -20px;
+				background-image: repeating-linear-gradient(to right, var(--paper-line) 0 8px, transparent 8px 18px);
+			}
+
+			.divisor::before,
+			.divisor::after {
+				content: '';
+				position: absolute;
+				top: -7px;
+				width: 14px;
+				height: 14px;
+				border-radius: 50%;
+				background: var(--ink);
+			}
+
+			.divisor::before {
+				left: -7px;
+			}
+
+			.divisor::after {
+				right: -7px;
+			}
+
+			h2 {
+				font-family: var(--font-display);
+				font-weight: 600;
+				font-size: 21px;
+				margin: 0 0 4px;
+			}
+
+			.hint {
+				font-size: 13px;
+				color: var(--paper-dim);
+				margin: 0 0 20px;
+			}
+
+			form label {
+				display: block;
+				font-size: 12px;
+				text-transform: uppercase;
+				letter-spacing: 0.06em;
+				color: var(--paper-dim);
+				margin-bottom: 14px;
+			}
+
+			form input {
+				display: block;
+				width: 100%;
+				margin-top: 6px;
+				padding: 11px 12px;
+				background: var(--paper);
+				border: 1px solid #d8c7a4;
+				border-radius: 8px;
+				font-family: var(--font-body);
+				font-size: 15px;
+				color: var(--ink);
+			}
+
+			form input::placeholder {
+				color: #8a7f6a;
+			}
+
+			form input:focus-visible {
+				outline: 2px solid var(--brass);
+				outline-offset: 1px;
+			}
+
+			.grid-2 {
+				display: grid;
+				grid-template-columns: 1fr 1fr;
+				gap: 0 12px;
+			}
+
+			fieldset.chips {
+				border: none;
+				padding: 0;
+				margin: 0 0 16px;
+			}
+
+			fieldset.chips legend {
+				font-size: 12px;
+				text-transform: uppercase;
+				letter-spacing: 0.06em;
+				color: var(--paper-dim);
+				padding: 0;
+				margin-bottom: 8px;
+			}
+
+			.chip-row {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 8px;
+			}
+
+			.chip {
+				font-family: var(--font-mono);
+				font-size: 12px;
+				letter-spacing: 0.03em;
+				padding: 8px 14px;
+				border-radius: 999px;
+				border: 1px solid var(--paper-line);
+				background: transparent;
+				color: var(--paper-dim);
+				cursor: pointer;
+				transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+			}
+
+			.chip[aria-pressed='true'] {
+				background: var(--brass);
+				border-color: var(--brass);
+				color: var(--ink);
+			}
+
+			.chip:focus-visible {
+				outline: 2px solid var(--brass);
+				outline-offset: 2px;
+			}
+
+			.chips-error {
+				animation: sacudir 0.3s ease;
+			}
+
+			@keyframes sacudir {
+				25% {
+					transform: translateX(-4px);
+				}
+				75% {
+					transform: translateX(4px);
+				}
+			}
+
+			.btn-guardar {
+				width: 100%;
+				padding: 13px;
+				margin-top: 4px;
+				border: none;
+				border-radius: 8px;
+				background: var(--brass);
+				color: var(--ink);
+				font-family: var(--font-body);
+				font-weight: 600;
+				font-size: 15px;
+				cursor: pointer;
+				transition: background 0.15s ease, transform 0.1s ease;
+			}
+
+			.btn-guardar:hover {
+				background: var(--brass-deep);
+			}
+
+			.btn-guardar:active {
+				transform: scale(0.98);
+			}
+
+			.btn-guardar:focus-visible {
+				outline: 2px solid var(--paper);
+				outline-offset: 2px;
+			}
+
+			.confirmacion {
+				font-family: var(--font-mono);
+				font-size: 12.5px;
+				color: var(--pine);
+				margin-top: 12px;
+				min-height: 16px;
+				opacity: 0;
+				transition: opacity 0.25s ease;
+			}
+
+			.confirmacion-visible {
+				opacity: 1;
+			}
+
+			.panel-head {
+				display: flex;
+				align-items: baseline;
+				justify-content: space-between;
+				margin-bottom: 14px;
+			}
+
+			.contador {
+				font-family: var(--font-mono);
+				font-size: 12px;
+				color: var(--paper-dim);
+			}
+
+			.lista-planes {
+				list-style: none;
+				margin: 0;
+				padding: 0;
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+			}
+
+			.tarjeta {
+				display: flex;
+				align-items: flex-start;
+				gap: 12px;
+				background: var(--paper);
+				color: var(--ink);
+				border-radius: var(--radius);
+				padding: 14px 14px 14px 16px;
+				border-left: 4px solid var(--tag-color);
+			}
+
+			.sello {
+				font-family: var(--font-mono);
+				font-size: 10px;
+				text-transform: uppercase;
+				letter-spacing: 0.05em;
+				color: var(--tag-color);
+				border: 1px solid var(--tag-color);
+				border-radius: 4px;
+				padding: 3px 6px;
+				transform: rotate(-2deg);
+				white-space: nowrap;
+				margin-top: 2px;
+			}
+
+			.tarjeta-cuerpo {
+				flex: 1;
+				min-width: 0;
+			}
+
+			.tarjeta-cuerpo h3 {
+				font-family: var(--font-display);
+				font-size: 16px;
+				font-weight: 600;
+				margin: 0 0 2px;
+			}
+
+			.tarjeta-meta {
+				font-family: var(--font-mono);
+				font-size: 12px;
+				color: #5c5341;
+				margin: 0;
+			}
+
+			.estado {
+				font-family: var(--font-mono);
+				font-size: 10px;
+				text-transform: uppercase;
+				color: #8a7f6a;
+				align-self: flex-start;
+				margin-top: 2px;
+				white-space: nowrap;
+			}
+
+			.estado-completado {
+				color: #4b6455;
+			}
+
+			.vacio {
+				font-size: 14px;
+				color: var(--paper-dim);
+				border: 1px dashed var(--paper-line);
+				border-radius: 10px;
+				padding: 20px;
+				text-align: center;
+			}
+
+			.nota {
+				margin-top: 44px;
+				font-family: var(--font-mono);
+				font-size: 11px;
+				color: #5c6879;
+				text-align: center;
+			}
+
+			@media (prefers-reduced-motion: reduce) {
+				* {
+					animation: none !important;
+					transition: none !important;
+				}
+			}
+
+			@media (min-width: 540px) {
+				.app {
+					padding-top: 52px;
+				}
+			}
+		</style>
+	</body>
+</html>
