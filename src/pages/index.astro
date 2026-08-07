@@ -214,32 +214,58 @@
 				contadorEl.textContent = `${planesSemana.length} ${planesSemana.length === 1 ? 'plan' : 'planes'}`;
 			}
 
-			formEl.addEventListener('submit', (e) => {
-				e.preventDefault();
+				formEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
 
-				if (!tipoSeleccionado) {
-					const fieldset = formEl.querySelector('.chips') as HTMLFieldSetElement;
-					fieldset.classList.add('chips-error');
-					fieldset.addEventListener('animationend', () => fieldset.classList.remove('chips-error'), { once: true });
-					return;
-				}
+    if (!tipoSeleccionado) {
+        const fieldset = formEl.querySelector('.chips');
+        fieldset.classList.add('chips-error');
+        fieldset.addEventListener('animationend', () => fieldset.classList.remove('chips-error'), { once: true });
+        return;
+    }
 
-				const datos = new FormData(formEl);
-				const nuevoPlan: Plan = {
-					id: crypto.randomUUID(),
-					titulo: String(datos.get('titulo') ?? '').trim(),
-					tipo: tipoSeleccionado,
-					fecha: String(datos.get('fecha') ?? ''),
-					lugar: String(datos.get('lugar') ?? '').trim(),
-					costo: String(datos.get('costo') ?? '').trim(),
-					url: String(datos.get('url') ?? '').trim(),
-					estado: 'pendiente',
-					aprobado_semana: false,
-				};
+    const datos = new FormData(formEl);
+    const nuevoPlan = {
+        id: crypto.randomUUID(),
+        titulo: String(datos.get('titulo') ?? '').trim(),
+        tipo: tipoSeleccionado,
+        fecha: String(datos.get('fecha') ?? ''),
+        lugar: String(datos.get('lugar') ?? '').trim(),
+        costo: String(datos.get('costo') ?? '').trim(),
+        url: String(datos.get('url') ?? '').trim(),
+        // estado y aprobado_semana ya se manejan directamente en la inserción SQL del backend
+    };
 
-				pendientesSinAprobar.push(nuevoPlan);
-				// TODO(supabase): swap the line above for a real insert into the
-				// `media_planner` table via the ingestion endpoint (architecture.md §2).
+    // --- NUEVO CÓDIGO DE INYECCIÓN ---
+    try {
+        const respuesta = await fetch('/api/plan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(nuevoPlan)
+        });
+
+        if (!respuesta.ok) throw new Error('Falló la conexión con Turso');
+
+        formEl.reset();
+        chipButtons.forEach((b) => b.setAttribute('aria-pressed', 'false'));
+        tipoSeleccionado = null;
+
+        confirmacionEl.textContent = 'Guardado. Aparecerá en "Esta semana" cuando lo aprueben.';
+        confirmacionEl.classList.add('confirmacion-visible');
+        window.setTimeout(() => confirmacionEl.classList.remove('confirmacion-visible'), 3200);
+
+    } catch (error) {
+        console.error(error);
+        confirmacionEl.textContent = 'Hubo un error al guardar. Revisa tu conexión.';
+        confirmacionEl.style.color = 'var(--rose)'; // Usa tu variable CSS para errores
+        confirmacionEl.classList.add('confirmacion-visible');
+        window.setTimeout(() => {
+            confirmacionEl.classList.remove('confirmacion-visible');
+            confirmacionEl.style.color = ''; 
+        }, 3200);
+    }
+});
+
 
 				formEl.reset();
 				chipButtons.forEach((b) => b.setAttribute('aria-pressed', 'false'));
